@@ -286,7 +286,11 @@ class SmartIRMediaPlayer(MediaPlayerEntity, RestoreEntity):
     async def send_command(self, command):
         async with self._temp_lock:
             try:
-                await self._controller.send(command)
+                if isinstance(command, list):
+                    for subcommand in command:
+                        await self._controller.send(subcommand)
+                else:
+                    await self._controller.send(command)
             except Exception as e:
                 _LOGGER.exception(e)
             

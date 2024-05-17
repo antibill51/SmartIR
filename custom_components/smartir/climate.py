@@ -7,9 +7,7 @@ import voluptuous as vol
 
 from homeassistant.components.climate import ClimateEntity, PLATFORM_SCHEMA
 from homeassistant.components.climate.const import (
-    HVACMode,
-    ClimateEntityFeature,
-    HVAC_MODES, ATTR_HVAC_MODE)
+    ClimateEntityFeature, HVACMode, HVAC_MODES, ATTR_HVAC_MODE)
 from homeassistant.const import (
     CONF_NAME, STATE_ON, STATE_OFF, STATE_UNKNOWN, STATE_UNAVAILABLE, ATTR_TEMPERATURE,
     PRECISION_TENTHS, PRECISION_HALVES, PRECISION_WHOLE)
@@ -36,7 +34,9 @@ CONF_POWER_SENSOR_RESTORE_STATE = 'power_sensor_restore_state'
 
 SUPPORT_FLAGS = (
     ClimateEntityFeature.TARGET_TEMPERATURE | 
-    ClimateEntityFeature.FAN_MODE
+    ClimateEntityFeature.FAN_MODE |
+    ClimateEntityFeature.TURN_ON |
+    ClimateEntityFeature.TURN_OFF
 )
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
@@ -95,6 +95,8 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
     )])
 
 class SmartIRClimate(ClimateEntity, RestoreEntity):
+    _enable_turn_on_off_backwards_compatibility = False
+
     def __init__(self, hass, config, device_data):
         _LOGGER.debug(f"SmartIRClimate init started for device {config.get(CONF_NAME)} supported models {device_data['supportedModels']}")
         self.hass = hass

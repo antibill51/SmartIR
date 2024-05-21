@@ -1,7 +1,5 @@
 import asyncio
-import json
 import logging
-import os.path
 
 import voluptuous as vol
 
@@ -18,9 +16,12 @@ from homeassistant.components.media_player.const import (
     MEDIA_TYPE_CHANNEL,
 )
 from homeassistant.const import CONF_NAME, STATE_OFF, STATE_ON, STATE_UNKNOWN
+from homeassistant.core import HomeAssistant, Event, EventStateChangedData
+from homeassistant.helpers.event import async_track_state_change_event
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
-from . import COMPONENT_ABS_DIR, Helper
+from homeassistant.helpers.typing import ConfigType
+from . import DeviceData
 from .controller import get_controller
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,47 +52,25 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_platform(
+    hass: HomeAssistant, config: ConfigType, async_add_entities, discovery_info=None
+):
     """Set up the IR Media Player platform."""
-    device_code = config.get(CONF_DEVICE_CODE)
-    device_files_subdir = os.path.join("codes", "media_player")
-    device_files_absdir = os.path.join(COMPONENT_ABS_DIR, device_files_subdir)
-
-    if not os.path.isdir(device_files_absdir):
-        os.makedirs(device_files_absdir)
-
-    device_json_filename = str(device_code) + ".json"
-    device_json_path = os.path.join(device_files_absdir, device_json_filename)
-
-    if not os.path.exists(device_json_path):
-        _LOGGER.warning(
-            "Couldn't find the device Json file. The component will "
-            "try to download it from the GitHub repo."
+    _LOGGER.debug("Setting up the smartir media player platform")
+    if not (
+        device_data := DeviceData.load_file(
+            config.get(CONF_DEVICE_CODE),
+            "media_player",
+            [
+                "manufacturer",
+                "supportedModels",
+                "supportedController",
+                "commandsEncoding",
+            ],
         )
-
-        try:
-            codes_source = (
-                "https://raw.githubusercontent.com/"
-                "smartHomeHub/SmartIR/master/"
-                "codes/media_player/{}.json"
-            )
-
-            await Helper.downloader(codes_source.format(device_code), device_json_path)
-        except Exception:
-            _LOGGER.error(
-                "There was an error while downloading the device Json file. "
-                "Please check your internet connection or if the device code "
-                "exists on GitHub. If the problem still exists please "
-                "place the file manually in the proper directory."
-            )
-            return
-
-    with open(device_json_path) as j:
-        try:
-            device_data = json.load(j)
-        except Exception:
-            _LOGGER.error("The device JSON file is invalid")
-            return
+    ):
+        _LOGGER.error("Smartir media player device data init failed!")
+        return
 
     async_add_entities([SmartIRMediaPlayer(hass, config, device_data)])
 
@@ -184,6 +163,11 @@ class SmartIRMediaPlayer(MediaPlayerEntity, RestoreEntity):
         if last_state is not None:
             self._state = last_state.state
 
+        if self._power_sensor:
+            async_track_state_change_event(
+                self.hass, self._power_sensor, self._async_power_sensor_changed
+            )
+
     @property
     def should_poll(self):
         """Push an update after each command."""
@@ -225,6 +209,8 @@ class SmartIRMediaPlayer(MediaPlayerEntity, RestoreEntity):
 
     @property
     def source(self):
+        if self._on_by_remote:
+            return STATE_UNKNOWN
         return self._source
 
     @property
@@ -245,50 +231,84 @@ class SmartIRMediaPlayer(MediaPlayerEntity, RestoreEntity):
 
     async def async_turn_off(self):
         """Turn the media player off."""
-        await self.send_command(self._commands["off"])
+        if not "off" in self._commands.keys():
+            _LOGGER.error("Missing device IR code for 'off' command.")
+            return
 
-        if self._power_sensor is None:
-            self._state = STATE_OFF
-            self._source = None
-            self.async_write_ha_state()
+        await self._controller.send(self._commands["off"])
+        self._state = STATE_OFF
+        self._source = None
+        self.async_write_ha_state()
 
     async def async_turn_on(self):
         """Turn the media player off."""
-        await self.send_command(self._commands["on"])
+        if not "on" in self._commands.keys():
+            _LOGGER.error("Missing device IR code for 'on' command.")
+            return
 
-        if self._power_sensor is None:
-            self._state = STATE_ON
-            self.async_write_ha_state()
+        await self.send_command(self._commands["on"])
+        self._state = STATE_ON
+        self.async_write_ha_state()
 
     async def async_media_previous_track(self):
         """Send previous track command."""
+        if not "previousChannel" in self._commands.keys():
+            _LOGGER.error("Missing device IR code for 'previousChannel' command.")
+            return
+
         await self.send_command(self._commands["previousChannel"])
         self.async_write_ha_state()
 
     async def async_media_next_track(self):
         """Send next track command."""
+        if not "nextChannel" in self._commands.keys():
+            _LOGGER.error("Missing device IR code for 'nextChannel' command.")
+            return
+
         await self.send_command(self._commands["nextChannel"])
         self.async_write_ha_state()
 
     async def async_volume_down(self):
         """Turn volume down for media player."""
+        if not "volumeDown" in self._commands.keys():
+            _LOGGER.error("Missing device IR code for 'volumeDown' command.")
+            return
+
         await self.send_command(self._commands["volumeDown"])
         self.async_write_ha_state()
 
     async def async_volume_up(self):
         """Turn volume up for media player."""
+        if "volumeUp" in self._commands.keys():
+            _LOGGER.error("Missing device IR code for 'volumeUp' command.")
+            return
+
         await self.send_command(self._commands["volumeUp"])
         self.async_write_ha_state()
 
     async def async_mute_volume(self, mute):
         """Mute the volume."""
+        if not "mute" in self._commands.keys():
+            _LOGGER.error("Missing device IR code for 'mute' command.")
+            return
+
         await self.send_command(self._commands["mute"])
         self.async_write_ha_state()
 
     async def async_select_source(self, source):
         """Select channel from source."""
-        self._source = source
+        if not (
+            "sources" in self._commands.keys()
+            and isinstance(self._commands["sources"], dict)
+            and source in self._commands["sources"].keys()
+        ):
+            _LOGGER.error(
+                "Missing device IR code for 'sources' source '%s' command.", source
+            )
+            return
+
         await self.send_command(self._commands["sources"][source])
+        self._source = source
         self.async_write_ha_state()
 
     async def async_play_media(self, media_type, media_id, **kwargs):
@@ -305,9 +325,17 @@ class SmartIRMediaPlayer(MediaPlayerEntity, RestoreEntity):
 
         self._source = "Channel {}".format(media_id)
         for digit in media_id:
-            await self.send_command(
-                self._commands["sources"]["Channel {}".format(digit)]
-            )
+            source = "Channel {}".format(digit)
+            if not (
+                "sources" in self._commands.keys()
+                and isinstance(self._commands["sources"], dict)
+                and source in self._commands["sources"].keys()
+            ):
+                _LOGGER.error(
+                    "Missing device IR code for 'sources' source '%s' command.", source
+                )
+                return
+            await self.send_command(self._commands["sources"][source])
         self.async_write_ha_state()
 
     async def send_command(self, command):
@@ -321,15 +349,25 @@ class SmartIRMediaPlayer(MediaPlayerEntity, RestoreEntity):
             except Exception as e:
                 _LOGGER.exception(e)
 
-    async def async_update(self):
-        if self._power_sensor is None:
+    async def _async_power_sensor_changed(
+        self, event: Event[EventStateChangedData]
+    ) -> None:
+        """Handle power sensor changes."""
+        old_state = event.data["old_state"]
+        new_state = event.data["new_state"]
+        if new_state is None:
             return
 
-        power_state = self.hass.states.get(self._power_sensor)
+        if old_state is not None and new_state.state == old_state.state:
+            return
 
-        if power_state:
-            if power_state.state == STATE_OFF:
+        if new_state.state == STATE_ON and self._state == STATE_OFF:
+            self._on_by_remote = True
+            self._state = STATE_ON
+            self.async_write_ha_state()
+        elif new_state.state == STATE_OFF:
+            self._on_by_remote = False
+            if self._state != STATE_OFF:
                 self._state = STATE_OFF
                 self._source = None
-            elif power_state.state == STATE_ON:
-                self._state = STATE_ON
+            self.async_write_ha_state()

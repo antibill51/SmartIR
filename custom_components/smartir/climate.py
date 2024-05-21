@@ -1,7 +1,5 @@
 import asyncio
-import json
 import logging
-import os.path
 
 import voluptuous as vol
 
@@ -24,11 +22,12 @@ from homeassistant.const import (
     PRECISION_HALVES,
     PRECISION_WHOLE,
 )
-from homeassistant.core import Event, EventStateChangedData, callback
+from homeassistant.core import HomeAssistant, Event, EventStateChangedData, callback
 from homeassistant.helpers.event import async_track_state_change_event
 import homeassistant.helpers.config_validation as cv
 from homeassistant.helpers.restore_state import RestoreEntity
-from . import COMPONENT_ABS_DIR, Helper
+from homeassistant.helpers.typing import ConfigType
+from . import DeviceData
 from .controller import get_controller
 
 _LOGGER = logging.getLogger(__name__)
@@ -67,50 +66,30 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
+async def async_setup_platform(
+    hass: HomeAssistant, config: ConfigType, async_add_entities, discovery_info=None
+):
     """Set up the IR Climate platform."""
-    _LOGGER.debug("Setting up the startir platform")
-    device_code = config.get(CONF_DEVICE_CODE)
-    device_files_subdir = os.path.join("codes", "climate")
-    device_files_absdir = os.path.join(COMPONENT_ABS_DIR, device_files_subdir)
-
-    if not os.path.isdir(device_files_absdir):
-        os.makedirs(device_files_absdir)
-
-    device_json_filename = str(device_code) + ".json"
-    device_json_path = os.path.join(device_files_absdir, device_json_filename)
-
-    if not os.path.exists(device_json_path):
-        _LOGGER.warning(
-            "Couldn't find the device Json file. The component will "
-            "try to download it from the GitHub repo."
+    _LOGGER.debug("Setting up the smartir climate platform")
+    if not (
+        device_data := DeviceData.load_file(
+            config.get(CONF_DEVICE_CODE),
+            "climate",
+            [
+                "manufacturer",
+                "supportedModels",
+                "supportedController",
+                "commandsEncoding",
+                "minTemperature",
+                "maxTemperature",
+                "precision",
+                "operationModes",
+                "fanModes",
+            ],
         )
-
-        try:
-            codes_source = (
-                "https://raw.githubusercontent.com/"
-                "antibill51/SmartIR/master/"
-                "codes/climate/{}.json"
-            )
-
-            await Helper.downloader(codes_source.format(device_code), device_json_path)
-        except Exception:
-            _LOGGER.error(
-                "There was an error while downloading the device Json file. "
-                "Please check your internet connection or if the device code "
-                "exists on GitHub. If the problem still exists please "
-                "place the file manually in the proper directory."
-            )
-            return
-
-    with open(device_json_path) as j:
-        try:
-            _LOGGER.debug(f"loading json file {device_json_path}")
-            device_data = json.load(j)
-            _LOGGER.debug(f"{device_json_path} file loaded")
-        except Exception:
-            _LOGGER.error("The device Json file is invalid")
-            return
+    ):
+        _LOGGER.error("Smartir climate device data init failed!")
+        return
 
     async_add_entities([SmartIRClimate(hass, config, device_data)])
 
@@ -257,6 +236,8 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
     @property
     def target_temperature(self):
         """Return the temperature we try to reach."""
+        if self._hvac_mode == STATE_UNKNOWN:
+            return STATE_UNKNOWN
         return self._target_temperature
 
     @property
@@ -287,6 +268,8 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
     @property
     def fan_mode(self):
         """Return the fan setting."""
+        if self._hvac_mode == STATE_UNKNOWN:
+            return STATE_UNKNOWN
         return self._fan_mode
 
     @property
@@ -297,6 +280,8 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
     @property
     def swing_mode(self):
         """Return the current swing mode."""
+        if self._hvac_mode == STATE_UNKNOWN:
+            return STATE_UNKNOWN
         return self._swing_mode
 
     @property
@@ -317,6 +302,8 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
     @property
     def hvac_action(self) -> HVACAction | None:
         """Return the current running hvac operation if supported."""
+        if self._hvac_mode == STATE_UNKNOWN:
+            return STATE_UNKNOWN
         return self._hvac_action
 
     @property
@@ -398,26 +385,20 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
                 if hvac_mode == HVACMode.OFF:
                     if (
                         self._last_on_operation == HVACMode.COOL
-                        and isinstance(self._commands, dict)
                         and "off_cool" in self._commands.keys()
                     ):
                         await self._controller.send(self._commands["off_cool"])
                     elif (
                         self._last_on_operation == HVACMode.HEAT
-                        and isinstance(self._commands, dict)
                         and "off_heat" in self._commands.keys()
                     ):
                         await self._controller.send(self._commands["off_heat"])
                     elif (
                         self._last_on_operation == HVACMode.FAN_ONLY
-                        and isinstance(self._commands, dict)
                         and "off_fan" in self._commands.keys()
                     ):
                         await self._controller.send(self._commands["off_fan"])
-                    elif (
-                        isinstance(self._commands, dict)
-                        and "off" in self._commands.keys()
-                    ):
+                    elif "off" in self._commands.keys():
                         await self._controller.send(self._commands["off"])
                     else:
                         _LOGGER.error(
@@ -425,20 +406,14 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
                         )
                         return
                 else:
-                    if not (
-                        isinstance(self._commands, dict)
-                        and "on" in self._commands.keys()
-                    ):
+                    if not "on" in self._commands.keys():
                         """if on code is not present, the on bit can be still set in the all operation/fan codes"""
                         pass
                     else:
                         await self._controller.send(self._commands["on"])
                         await asyncio.sleep(self._delay)
 
-                    if not (
-                        isinstance(self._commands, dict)
-                        and hvac_mode in self._commands.keys()
-                    ):
+                    if not hvac_mode in self._commands.keys():
                         _LOGGER.error(
                             "Missing device IR code for %s operation mode.", hvac_mode
                         )
@@ -547,7 +522,7 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
         """Handle power sensor changes."""
         old_state = event.data["old_state"]
         new_state = event.data["new_state"]
-        if new_state is None or new_state == old_state:
+        if new_state is None:
             return
 
         if old_state is not None and new_state.state == old_state.state:
@@ -560,8 +535,8 @@ class SmartIRClimate(ClimateEntity, RestoreEntity):
                 and self._last_on_operation is not None
             ):
                 self._hvac_mode = self._last_on_operation
-            elif len(self._operation_modes) > 1:
-                self._hvac_mode = self._operation_modes[1]
+            else:
+                self._hvac_mode = STATE_UNKNOWN
             await self._async_update_hvac_action()
         elif new_state.state == STATE_OFF:
             self._on_by_remote = False
